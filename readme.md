@@ -15,7 +15,7 @@
 
      
 
-2. **Dependencies**
+3. **Dependencies**
    - Install the required Python packages:
      ```
      pip install -r requirements.txt     
