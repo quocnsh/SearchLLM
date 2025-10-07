@@ -1,182 +1,534 @@
-# Define the output file path for storing results  
-OUTPUT_FILE = "5_data/result_testing.csv"  
-  
-# Import required utilities and models from custom modules  
-from LLM_util import OPENAI, GPT_4O_MINI  
-from search_engine_util import (  
-    find_best_similarity_by_relative_search,  
-    measure_similarity_with_url_return_matching_index,  
-    calculate_sim_for_regeneration,  
-)  
-  
-# Import accuracy and AUC metric calculations from sklearn  
-from sklearn.metrics import auc, roc_curve, accuracy_score  
-  
-# Import numpy for numerical computations  
-import numpy as np  
-  
-# Import os for file and directory manipulations  
-import os  
-  
-# Import pandas for structured data manipulation  
-import pandas as pd  
-  
-# Import csv for reading and writing csv files  
-import csv  
-  
-# Import the Hugging Face transformers pipeline for model inference  
-from transformers import pipeline  
-  
-# Constant for representing API errors  
-API_ERROR = "API_ERROR"  
-  
-# Human label constant, usually used as a ground truth label  
-HUMAN_LABEL = 0  
-  
-# Machine label constant, usually used for machine-generated content  
-MACHINE_LABEL = 1  
-  
-# String representation for human type  
-HUMAN = "human"  
-  
-# String representation for machine type  
-MACHINE = "machine"  
-
-def write_to_file(filename, text):
-    """
-    Writes the given text to a file and prints it to the console.
+import torch
+import ast 
+OUTPUT_FILE = "20_result/result_ablation.txt"
+from _9_constant import *
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import auc,roc_curve
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from scipy.stats import ttest_rel
+from _wikipedia_util import search_by_NER_and_first_k_sentence, calculate_similarity_with_regeneration
+from datetime import datetime
+from sklearn.metrics import recall_score, precision_score, f1_score
+from sklearn.metrics import accuracy_score
 
 
-    Parameters:  
-        filename (str): The path to the file where the text will be written.  
-        text (str): The text to be written and printed.  
 
-    Returns:  
-        None  
-    """  
-    # Print the text to the console  
+MIN_RATIO = 0.5
+MIN_SIM_PARAPHRASE = 0.86
+MIN_SIM_MACHINE = 0.86
+MIN_SIM_HUMAN = 0.99
+MIN_REGENERATE_DIFF = 0.00923
+MIN_NUM_WORD = 30
+
+
+TILDE_HUMAN = "~human"
+
+FOUND = "found"
+NOT_FOUND = "not_found"
+import numpy as np
+from sklearn.metrics import accuracy_score
+import os
+import pandas as pd 
+import csv
+from transformers import pipeline
+
+from datetime import datetime
+
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+MAGE_MODEL = "yaful/MAGE"  
+RADAR_MODEL = "TrustSafeAI/RADAR-Vicuna-7B"
+MODELS = {MAGE_MODEL: None, RADAR_MODEL: None}
+
+import os
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+
+HUMAN_LABEL = 0
+MACHINE_LABEL = 1
+
+HUMAN = "human"
+MACHINE = "machine"
+UNKNOWN = "unknown"
+TRAIN = "train"
+VALIDAION = "validation"
+TEST = "test"
+
+
+
+def write_to_file(filename, text):  
+    """Print text and append it to a file."""  
     print(text)  
-    # Open the file in append mode with UTF-8 encoding and write the text  
     with open(filename, "a+", encoding="utf-8") as f:  
         f.write(text)
 
 
 def read_csv_data(input_file):  
-    """  
-    Reads data from a CSV file and returns its contents as a NumPy array.  
+    """Read CSV file and return its values as a numpy array of strings."""  
+    data = pd.read_csv(input_file, dtype='string', keep_default_na=False, sep=',').values  
+    return data  
   
-    Parameters:  
-        input_file (str): The path to the CSV file to be read.  
   
-    Returns:  
-        numpy.ndarray: The contents of the CSV file as a NumPy array of strings.  
-    """  
-    # Read the CSV file into a pandas DataFrame with all columns as string type,  
-    # do not convert default NA values, and use comma as the separator  
-    my_file = pd.read_csv(  
-        input_file,  
-        dtype='string',  
-        keep_default_na=False,  
-        sep=','  
-    ).values  
-  
-    # Return the data as a NumPy array  
-    return my_file  
-
-# def write_to_csv(filename, row):
-#     with open(filename, 'a+', encoding='UTF8', newline='') as f:
-#         writer = csv.writer(f)
-#         writer.writerow(row)
-
 def write_to_csv(filename, row):  
-    """  
-    Appends a single row to a CSV file.  
+    """Append a row to a CSV file."""  
+    with open(filename, 'a+', encoding='UTF8', newline='') as f:  
+        writer = csv.writer(f)  
+        writer.writerow(row)  
   
-    Parameters:  
-        filename (str): The path of the CSV file to write to.  
-        row (list): The row data to write into the CSV file.  
+  
+def create_folder_for_file(file_name):  
+    """Create the folder for the given file if it does not exist."""  
+    path_name = os.path.dirname(file_name)  
+    print(f"path_name = {path_name}")  
+    if not os.path.exists(path_name):  
+        os.makedirs(path_name)
+
+def convert_to_object(data):  
+    """  
+    Convert the input string to a Python object using ast.literal_eval.  
+  
+    Example:  
+        input: '["a", "b", "c"]' (str)  
+        output: ["a", "b", "c"] (list)  
+    """  
+    return ast.literal_eval(data)  
+  
+  
+def calculate_similarity_by_SeachLLM_greedy_mapping_with_regeneration(  
+    input_file,  
+    output_file,  
+    model_name,  
+    number_of_first_sentence,  
+    minimum_similarity_for_mapping,  
+    minimum_similarity_for_regeneration,  
+    min_rate,  
+    number_sample=-1,  
+    custom_prompts=None  
+):  
+    """  
+    Calculate similarity using SearchLLM greedy mapping with regeneration.  
+  
+    Args:  
+        input_file: Input CSV file containing 'text' and 'label'.  
+        output_file: Output CSV file for results.  
+        model_name: Model name for similarity calculation.  
+        number_of_first_sentence: Number of first sentences to consider.  
+        minimum_similarity_for_mapping: Minimum similarity threshold for mapping.  
+        minimum_similarity_for_regeneration: Minimum similarity for regeneration.  
+        min_rate: Minimum rate for regeneration filter.  
+        number_sample: Number of samples to process (-1 for all).  
+        custom_prompts: List of custom prompts for regeneration.  
+  
+    Output file columns:  
+        text, label, similarity, url, all_similarity, mapping, regeneration_similarity, regeneration_mapping  
+    """  
+    start = datetime.now()  
+    write_to_file(OUTPUT_FILE, "******************************\n")  
+    write_to_file(OUTPUT_FILE, "calculate_similarity_by_SeachLLM_greedy_mapping_with_regeneration\n")  
+    write_to_file(OUTPUT_FILE, f"input_file - {input_file}\n")  
+    write_to_file(OUTPUT_FILE, f"output_file - {output_file}\n")  
+    data = read_csv_data(input_file)  
+    create_folder_for_file(output_file)  
+    if not os.path.exists(output_file):  
+        header = [  
+            "text",  
+            "label",  
+            "similarity",  
+            "url",  
+            "all_similarity",  
+            "mapping",  
+            "regeneration_similarity",  
+            "regeneration_mapping"  
+        ]  
+        write_to_csv(output_file, header)  
+    processed_data = read_csv_data(output_file)  
+    number_of_processed_item = len(processed_data)  
+    if number_sample == -1:  
+        number_sample = len(data)  
+    data = data[number_of_processed_item:number_sample]  
+    write_to_file(OUTPUT_FILE, f"Number of sample - {len(data)}\n")  
+    for index, item in enumerate(data):  
+        text = item[0]  
+        label = item[1]  
+        all_similarity = []  
+        mapping = []  
+        similarity, (url, additional_info) = search_by_NER_and_first_k_sentence(  
+            text,  
+            number_of_first_sentence,  
+            minimum_similarity_for_mapping  
+        )  
+        if additional_info is not None:  
+            all_similarity = additional_info[0]  
+            mapping = additional_info[1]  
+        regeneration_similarity = []  
+        regeneration_mapping = []  
+        if mapping is not None and len(mapping) > 0:  
+            org_filter_sim = []  
+            for sim in all_similarity:  
+                if sim > minimum_similarity_for_regeneration:  
+                    org_filter_sim.append(sim)  
+            if len(org_filter_sim) / len(all_similarity) >= min_rate:  
+                if custom_prompts is None:  
+                    ave_generation_sim, (regeneration_similarity, regeneration_mapping) = calculate_similarity_with_regeneration(  
+                        text, mapping, model_name  
+                    )  
+                else:  
+                    best_average = -2  
+                    for custom_prompt in custom_prompts:  
+                        current_ave_generation_sim, (current_regeneration_similarity, current_regeneration_mapping) = calculate_similarity_with_regeneration(  
+                            text, mapping, model_name, custom_prompt  
+                        )  
+                        if (  
+                            current_ave_generation_sim is not None and  
+                            current_ave_generation_sim > best_average  
+                        ):  
+                            best_average = current_ave_generation_sim  
+                            regeneration_similarity = current_regeneration_similarity  
+                            regeneration_mapping = current_regeneration_mapping  
+        row = [  
+            text,  
+            label,  
+            similarity,  
+            url,  
+            all_similarity,  
+            mapping,  
+            regeneration_similarity,  
+            regeneration_mapping  
+        ]  
+        write_to_csv(output_file, row)  
+        print(f"processed {index + 1}/{len(data)}")  
+    end = datetime.now()  
+    write_to_file(OUTPUT_FILE, f"Running time: {end - start}")  
+
+def measure_difference_similarity(  
+    original_sim,  
+    original_map,  
+    regeneration_sim,  
+    regeneration_map,  
+    min_paraphrase_diff,  
+    verbose=False  
+):  
+    """  
+    Measure the difference in similarity between original and regenerated sentences.  
+  
+    Args:  
+        original_sim: Similarity scores between input and Wikipedia text.  
+        original_map: Mapping between input and Wikipedia sentences.  
+        regeneration_sim: Similarity scores between input and regeneration.  
+        regeneration_map: Mapping between input and regeneration sentences.  
+        min_paraphrase_diff: Minimum paraphrase difference threshold.  
+        verbose: Whether to print debug information.  
   
     Returns:  
-        None  
+        Tuple containing the average difference and the lists of similarities, or (None, (None, None)) if conditions are not met.  
     """  
-    # Open the file in append mode with UTF-8 encoding and proper newline handling  
-    with open(filename, 'a+', encoding='UTF8', newline='') as f:  
-        # Create a CSV writer object  
-        writer = csv.writer(f)  
-        # Write the given row to the CSV file  
-        writer.writerow(row)  
+    ori_sim_by_sent = []  
+    for org_sim, org_map in zip(original_sim, original_map):  
+        num_sent = len(org_map[0])  
+        for _ in range(num_sent):  
+            ori_sim_by_sent.append(org_sim)  
+  
+    re_sim_by_sent = []  
+    for re_sim, re_map in zip(regeneration_sim, regeneration_map):  
+        num_re_sent = len(re_map[0])  
+        for _ in range(num_re_sent):  
+            re_sim_by_sent.append(re_sim)  
+  
+    if verbose:  
+        print(f"ori_sim_by_sent = {ori_sim_by_sent}")  
+        print(f"re_sim_by_sent = {re_sim_by_sent}")  
+  
+    if len(ori_sim_by_sent) != len(re_sim_by_sent):  
+        return None, (None, None)  
+  
+    filter_index = []  
+    for index, (org_sim_sent, re_sim_sent) in enumerate(zip(ori_sim_by_sent, re_sim_by_sent)):  
+        if org_sim_sent > min_paraphrase_diff and re_sim_sent > min_paraphrase_diff:  
+            filter_index.append(index)  
+  
+    if len(filter_index) == 0:  
+        return None, (None, None)  
+  
+    diff = []  
+    for index in filter_index:  
+        diff.append(re_sim_by_sent[index] - ori_sim_by_sent[index])  
+  
+    if verbose:  
+        print(f"diff = {diff}")  
+  
+    return np.average(diff), (ori_sim_by_sent, re_sim_by_sent)  
 
-# def detect_by_huggingface_with_search_engine_support(model, human, machine, human_label, machine_label, human_similarity, machine_similarity, human_threshold, machine_threshold, is_hard = True, max_length=512):
-#     if not is_hard:
-#         return detect_by_huggingface_with_search_engine_support_by_soft(model, human, machine, human_label, machine_label, human_similarity, machine_similarity, human_threshold, machine_threshold, max_length) 
 
-def detect_by_huggingface_with_search_engine_support(  
-    model,   
-    human,   
-    machine,   
-    human_label,   
-    machine_label,   
-    human_similarity,   
-    machine_similarity,   
-    human_threshold,   
-    machine_threshold,   
-    is_hard=True,   
+def predict_by_SearchLLM_with_regeneration_and_alignment_and_confidence(  
+    original_similarity,  
+    original_mapping,  
+    regeneration_similarity,  
+    regeneration_mapping,  
+    min_ratio,  
+    min_sim_paraphrase,  
+    min_sim_machine,  
+    min_sim_human,  
+    min_regenerate_diff,  
+    verbose=False  
+):  
+    """  
+    Predict the source (HUMAN, MACHINE, or UNKNOWN) based on similarity metrics and regeneration.  
+    Returns a tuple of prediction and confidence value.  
+    """  
+    avg_sim = 0  
+    predict = UNKNOWN  
+    filter_sim = []  
+  
+    # Filter similarities above the paraphrase threshold  
+    for sim in original_similarity:  
+        if sim > min_sim_paraphrase:  
+            filter_sim.append(sim)  
+  
+    N = len(original_similarity)  
+    pass_number = len(filter_sim)  
+  
+    if N > 0 and (pass_number / N) >= min_ratio:  
+        if len(filter_sim) == 0:  
+            avg_sim = 0  
+        else:  
+            avg_sim = np.average(filter_sim)  
+        if avg_sim >= min_sim_machine:  
+            if avg_sim >= min_sim_human:  
+                predict = HUMAN  
+            else:  
+                sim_diff, _ = measure_difference_similarity(  
+                    original_similarity,  
+                    original_mapping,  
+                    regeneration_similarity,  
+                    regeneration_mapping,  
+                    min_sim_paraphrase  
+                )  
+                if sim_diff is not None and sim_diff > min_regenerate_diff:  
+                    predict = MACHINE  
+  
+    if predict == HUMAN:  
+        return predict, 1 - avg_sim  
+    elif predict == MACHINE:  
+        return predict, avg_sim  
+    else:  
+        return predict, 0
+
+def detect_by_huggingface_with_search_engine_support_by_soft_and_confidence(  
+    model,  
+    human,  
+    machine,  
+    human_label,  
+    machine_label,  
+    human_similarity,  
+    machine_similarity,  
+    human_threshold,  
+    machine_threshold,  
     max_length=512  
 ):  
     """  
-    Detects whether the input text is written by a human or a machine, with support for   
-    search engine based similarity, using a HuggingFace model.  
+    Perform text classification using HuggingFace pipeline with search engine support.  
+    Soft prediction and confidence thresholds are used to determine final labels.  
+    Returns metrics for baseline and full evaluation.  
+    """  
+    start = datetime.now()  
+    HUMAN_prediction = -10000000  
+    MACHINE_prediction = 10000000  
+    print(f"model = {model}_with_search_engine_support\n")  
   
-    This function allows switching between a "hard" and "soft" detection method, depending   
-    on the `is_hard` flag. If `is_hard` is False, the function delegates to another   
-    detection function tailored for soft detection strategy.  
+    global MODELS  
+    if MODELS[model] is None:  
+        MODELS[model] = pipeline(  
+            "text-classification",  
+            model=model,  
+            tokenizer=model,  
+            max_length=512,  
+            truncation=True  
+        )  
   
-    Parameters:  
-        model:   
-            The HuggingFace model to use for detection.  
-        human:   
-            The input text believed to be written by a human.  
-        machine:   
-            The input text believed to be written by a machine (e.g., AI-generated text).  
-        human_label:   
-            The label associated with human-written text.  
-        machine_label:   
-            The label associated with machine-written text.  
-        human_similarity:   
-            The similarity score for the human text (from a search engine or similarity model).  
-        machine_similarity:   
-            The similarity score for the machine text (from a search engine or similarity model).  
-        human_threshold:   
-            The threshold above which text is considered human-written.  
-        machine_threshold:   
-            The threshold above which text is considered machine-written.  
-        is_hard (bool, optional):   
-            If True, apply hard detection logic (default: True).  
-            If False, apply soft detection logic using an alternative function.  
-        max_length (int, optional):  
-            The maximum length of the input text to consider (default: 512).  
+    label = []  
+    predict = []  
+    hard_predict = []  
+    label_for_searchLLM = []  
+    predict_by_SearchLLM = []  
+    baseline_predict = []  
+    label_for_baseline_only = []  
+    predict_for_baseline_only = []  
+  
+    # Process human samples  
+    result = MODELS[model](human)  
+    for sub_result, (human_sim, confidence) in zip(result, human_similarity):  
+        score = float(sub_result['score'])  
+        if human_sim >= human_threshold:  
+            predict.append(HUMAN_prediction - confidence)  
+            hard_predict.append(HUMAN)  
+            label_for_searchLLM.append(HUMAN)  
+            predict_by_SearchLLM.append(HUMAN)  
+        elif human_sim >= machine_threshold:  
+            predict.append(MACHINE_prediction + confidence)  
+            hard_predict.append(MACHINE)  
+            label_for_searchLLM.append(HUMAN)  
+            predict_by_SearchLLM.append(MACHINE)  
+        else:  
+            label_for_baseline_only.append(HUMAN)  
+            if sub_result['label'] == human_label:  
+                hard_predict.append(HUMAN)  
+                predict.append(1.0 - score)  
+                predict_for_baseline_only.append(1.0 - score)  
+            else:  
+                hard_predict.append(MACHINE)  
+                predict.append(score)  
+                predict_for_baseline_only.append(score)  
+        label.append(HUMAN)  
+        if sub_result['label'] == human_label:  
+            baseline_predict.append(1.0 - score)  
+        else:  
+            baseline_predict.append(score)  
+  
+    # Process machine samples  
+    result = MODELS[model](machine)  
+    for sub_result, (machine_sim, confidence) in zip(result, machine_similarity):  
+        score = float(sub_result['score'])  
+        if machine_sim >= human_threshold:  
+            label_for_searchLLM.append(MACHINE)  
+            predict_by_SearchLLM.append(HUMAN)  
+            predict.append(HUMAN_prediction - confidence)  
+            hard_predict.append(HUMAN)  
+        elif machine_sim >= machine_threshold:  
+            predict.append(MACHINE_prediction + confidence)  
+            hard_predict.append(MACHINE)  
+            label_for_searchLLM.append(MACHINE)  
+            predict_by_SearchLLM.append(MACHINE)  
+        else:  
+            label_for_baseline_only.append(MACHINE)  
+            if sub_result['label'] == human_label:  
+                hard_predict.append(HUMAN)  
+                predict.append(1.0 - score)  
+                predict_for_baseline_only.append(1.0 - score)  
+            else:  
+                hard_predict.append(MACHINE)  
+                predict.append(score)  
+                predict_for_baseline_only.append(score)  
+        label.append(MACHINE)  
+        if sub_result['label'] == human_label:  
+            baseline_predict.append(1.0 - score)  
+        else:  
+            baseline_predict.append(score)  
+  
+    # Evaluate SearchLLM  
+    accuracy = accuracy_score(label_for_searchLLM, predict_by_SearchLLM)  
+    matrix = confusion_matrix(label_for_searchLLM, predict_by_SearchLLM, labels=[HUMAN, MACHINE])  
+  
+    if len(human) == 0 or len(machine) == 0:  
+        acc = accuracy_score(label, hard_predict)  
+        print(f"acc = {acc}\n")  
+        return acc  
+    else:  
+        baseline_accuracy = full_evaluation(label, baseline_predict)  
+        baseline_accuracy["roc_auc_by_RADAR"] = calculate_roc_by_RADAR_code(label, baseline_predict)  
+  
+        full_metrics = full_evaluation(label, predict)  
+        full_metrics["roc_auc_by_RADAR"] = calculate_roc_by_RADAR_code(label, predict)  
+        print(f"full_metrics = {full_metrics}\n")  
+        end = datetime.now()  
+        print(f"Running time: {end - start}")  
+        full_metrics["Running time"] = end - start  
+        full_metrics["searchLLM matrix"] = matrix.tolist()  
+        baseline_only_matrix = matrix_based_on_threshold(  
+            label_for_baseline_only,  
+            predict_for_baseline_only,  
+            full_metrics["Best Threshold (by F1)"]  
+        )  
+        full_metrics["baseline_only_matrix"] = baseline_only_matrix.tolist()  
+        full_metrics["p_value"] = compare_models_scaled(  
+            label,  
+            baseline_predict,  
+            predict,  
+            scaling='minmax'  
+        )  
+        return baseline_accuracy, full_metrics
+
+def full_evaluation(y_true_text, y_scores):  
+    """  
+    Evaluate classifier performance with F1, precision, recall, confusion matrix, ROC AUC, and partial AUCs.  
+  
+    Args:  
+        y_true_text (list): List or array of true binary labels (0 or 1), in text format.  
+        y_scores (list): List or array of real-valued scores (higher = more likely class 1).  
   
     Returns:  
-        The result of the detection, possibly from a soft detection function.  
+        dict: Dictionary containing evaluation metrics.  
     """  
-    # If not using a hard detection strategy, delegate to the soft detection function  
-    if not is_hard:  
-        return detect_by_huggingface_with_search_engine_support_by_soft(  
-            model,   
-            human,   
-            machine,   
-            human_label,   
-            machine_label,   
-            human_similarity,   
-            machine_similarity,   
-            human_threshold,   
-            machine_threshold,   
-            max_length  
-        )  
+    y_true = []  
+    for y in y_true_text:  
+        if y == HUMAN:  
+            y_true.append(HUMAN_LABEL)  
+        else:  
+            y_true.append(MACHINE_LABEL)  
+    y_true = np.array(y_true)  
+    y_scores = np.array(y_scores)  
+  
+    # Compute ROC curve and thresholds  
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)  
+  
+    # Compute F1 score for each threshold  
+    f1_scores = []  
+    for thresh in thresholds:  
+        y_pred = (y_scores >= thresh).astype(int)  
+        f1 = f1_score(y_true, y_pred)  
+        f1_scores.append(f1)  
+  
+    # Find best threshold by F1  
+    best_idx = np.argmax(f1_scores)  
+    best_threshold = thresholds[best_idx]  
+  
+    # Final prediction using best threshold  
+    y_pred_optimal = (y_scores >= best_threshold).astype(int)  
+  
+    # Metrics  
+    best_f1 = f1_score(y_true, y_pred_optimal)  
+    precision = precision_score(y_true, y_pred_optimal)  
+    recall = recall_score(y_true, y_pred_optimal)  
+    conf_matrix = confusion_matrix(y_true, y_pred_optimal)  
+  
+    # Full ROC AUC  
+    roc_auc = auc(fpr, tpr)  
+  
+    # Partial AUC at FPR ≤ 0.1  
+    idx_10 = np.where(fpr <= 0.10)[0]  
+    auc_10 = auc(fpr[idx_10], tpr[idx_10]) / 0.10 if len(idx_10) > 1 else 0.0  
+  
+    # Partial AUC at FPR ≤ 0.01  
+    idx_01 = np.where(fpr <= 0.01)[0]  
+    auc_01 = auc(fpr[idx_01], tpr[idx_01]) / 0.01 if len(idx_01) > 1 else 0.0  
+  
+    return {  
+        "Best Threshold (by F1)": best_threshold,  
+        "F1 Score": best_f1,  
+        "Precision": precision,  
+        "Recall": recall,  
+        "Confusion Matrix": conf_matrix.tolist(),  # as nested list  
+        "ROC AUC": roc_auc,  
+        "ROC AUC@FPR<=10%": auc_10,  
+        "ROC AUC@FPR<=1%": auc_01  
+    }  
 
-
-
-def detect_by_huggingface_with_search_engine_support_by_soft(  
+def detect_by_huggingface_with_search_engine_support_and_confidence(  
+    model,  
+    human,  
+    machine,  
+    human_label,  
+    machine_label,  
+    human_similarity,  
+    machine_similarity,  
+    human_threshold,  
+    machine_threshold,  
+    is_hard=True,  
+    max_length=512  
+):  
+    """  
+    Detect using HuggingFace model with search engine support and confidence.  
+    """  
+    return detect_by_huggingface_with_search_engine_support_by_soft_and_confidence(  
         model,  
         human,  
         machine,  
@@ -186,454 +538,36 @@ def detect_by_huggingface_with_search_engine_support_by_soft(
         machine_similarity,  
         human_threshold,  
         machine_threshold,  
-        max_length=512  
-    ):  
-    """  
-    Uses a Hugging Face text-classification model with soft label adjustment based on   
-    search engine similarity to evaluate human and machine-generated texts.  
-  
-    Parameters:  
-        model (str):                 The name or path of the pretrained Hugging Face model.  
-        human (list of str):         A list of human-written texts.  
-        machine (list of str):       A list of machine-generated texts.  
-        human_label (str):           The label assigned by the model indicating 'human'.  
-        machine_label (str):         The label assigned by the model indicating 'machine'.  
-        human_similarity (list):     Similarity scores (e.g. cosine) for human texts.  
-        machine_similarity (list):   Similarity scores for machine texts.  
-        human_threshold (float):     Similarity threshold to consider a text as 'human'.  
-        machine_threshold (float):   Similarity threshold to consider a text as 'machine'.  
-        max_length (int):            Maximum sequence length for the model inputs.  
-  
-    Returns:  
-        float: The accuracy if no texts or the ROC AUC computed by 'calculate_roc_by_RADAR_code'.  
-    """  
-  
-    # Sentinel hard prediction for 'human'  
-    HUMAN_prediction = -10000000  
-  
-    # Sentinel hard prediction for 'machine'  
-    MACHINE_prediction = 10000000  
-  
-    # Print info about the model usage  
-    print(f"model = {model}_with_search_engine_support\n")  
-  
-    # Setup HuggingFace classification pipeline  
-    pipe = pipeline(  
-        "text-classification",  
-        model=model,  
-        tokenizer=model,  
-        max_length=max_length,  
-        truncation=True,  
-        device_map="auto"  
+        max_length  
     )  
   
-    label = []        # Store true labels  
-    predict = []      # Store predicted probabilities or sentinel values  
-    hard_predict = [] # Store hard predictions  
   
-    # Run prediction for human texts  
-    result = pipe(human)  
-    for sub_result, human_sim in zip(result, human_similarity):  
-        score = float(sub_result['score'])  # Model's confidence score  
-  
-        if human_sim >= human_threshold:  
-            # Predict as 'human' with sentinel if similarity above human threshold  
-            predict.append(HUMAN_prediction)  
-            hard_predict.append(HUMAN)  
-        elif human_sim >= machine_threshold:  
-            # Predict as 'machine' with sentinel if similarity above machine threshold  
-            predict.append(MACHINE_prediction)  
-            hard_predict.append(MACHINE)  
-        else:  
-            # Use model's prediction depending on label  
-            if sub_result['label'] == human_label:  
-                hard_predict.append(HUMAN)  
-                predict.append(1.0 - score)  
-            else:  
-                hard_predict.append(MACHINE)  
-                predict.append(score)  
-        # True label is 'human'  
-        label.append(HUMAN)  
-  
-    # Run prediction for machine texts  
-    result = pipe(machine)  
-    for sub_result, machine_sim in zip(result, machine_similarity):  
-        score = float(sub_result['score'])  # Model's confidence score  
-  
-        if machine_sim >= human_threshold:  
-            # Predict as 'human' if similarity above human threshold  
-            predict.append(HUMAN_prediction)  
-            hard_predict.append(HUMAN)  
-        elif machine_sim >= machine_threshold:  
-            # Predict as 'machine' if similarity above machine threshold  
-            predict.append(MACHINE_prediction)  
-            hard_predict.append(MACHINE)  
-        else:  
-            # Use model's prediction depending on label  
-            if sub_result['label'] == human_label:  
-                hard_predict.append(HUMAN)  
-                predict.append(1.0 - score)  
-            else:  
-                hard_predict.append(MACHINE)  
-                predict.append(score)  
-        # True label is 'machine'  
-        label.append(MACHINE)  
-  
-    # If there are no texts, return accuracy; otherwise, compute ROC AUC  
-    if len(human) == 0 or len(machine) == 0:  
-        acc = accuracy_score(label, hard_predict)  
-        print(f"acc = {acc}\n")  
-        return acc  
-    else:  
-        roc_auc_by_RADAR = calculate_roc_by_RADAR_code(label, predict)  
-        return roc_auc_by_RADAR  
-
-
-def detect_by_huggingface(model, human, machine, human_label, machine_label, is_hard=True, max_length=512):  
-    """  
-    Detects the type of content (human-generated or machine-generated) using a HuggingFace model.  
-      
-    This function selects between a 'hard' and a 'soft' detection method based on the is_hard flag.  
-    For 'hard' detection, this function assumes further logic will be implemented.  
-    For 'soft' detection (is_hard=False), it delegates the detection task to detect_by_huggingface_by_soft().  
-      
-    Parameters:  
-        model: The HuggingFace model used for detection.  
-        human: The human-generated texts or samples.  
-        machine: The machine-generated texts or samples.  
-        human_label: The label corresponding to human-generated content.  
-        machine_label: The label corresponding to machine-generated content.  
-        is_hard (bool, optional): If True, use the 'hard' detection method. If False, use the 'soft' method. Default is True.  
-        max_length (int, optional): The maximum sequence length for input. Default is 512.  
-  
-    Returns:  
-        The detection result, either from 'hard' or 'soft' detection logic.  
-    """  
-    # If not using the 'hard' detection method, use the 'soft' method  
-    if not is_hard:  
-        return detect_by_huggingface_by_soft(  
-            model, human, machine, human_label, machine_label, max_length  
-        )  
-    # For the 'hard' detection method, further logic can be implemented here  
-
-def detect_by_huggingface_by_soft(  
-    model,  
-    human,  
-    machine,  
-    human_label,  
-    machine_label,  
-    max_length=512  
-):  
-    """  
-    Evaluates a HuggingFace text classification model to distinguish between human and machine-generated texts.  
-  
-    Parameters:  
-        model (str): The HuggingFace model identifier or path.  
-        human (list of str): List of human-generated texts for classification.  
-        machine (list of str): List of machine-generated texts for classification.  
-        human_label (str): The expected label for human-generated text.  
-        machine_label (str): The expected label for machine-generated text.  
-        max_length (int, optional): Maximum length of text sequences for the model input. Default is 512.  
-  
-    Returns:  
-        float: ROC AUC score (or accuracy if only one of human or machine is provided).  
-    """  
-  
-    # Print out the used model  
-    print(f"model = {model}\n")  
-  
-    # Create a HuggingFace pipeline for text classification using the provided model  
-    pipe = pipeline(  
-        "text-classification",  
-        model=model,  
-        tokenizer=model,  
-        max_length=max_length,  
-        truncation=True,  
-        device_map="auto"  
-    )  
-  
-    # Initialize lists to store labels, predictions, and scores  
-    label = []  
-    predict = []  
-    human_score = []  
-    hard_predict = []  
-  
-    # Run the model on human-generated texts  
-    result = pipe(human)  
-    for sub_result in result:  
-        # Extract the confidence score of the prediction  
-        score = float(sub_result['score'])  
-        # Check if the predicted label matches the human label  
-        if sub_result['label'] == human_label:  
-            hard_predict.append(HUMAN)                # Add HUMAN to hard predictions  
-            predict.append(1.0 - score)               # Append inverted probability for human label  
-            human_score.append(score)                 # Record score for human  
-        else:  
-            hard_predict.append(MACHINE)              # Add MACHINE to hard predictions  
-            predict.append(score)                     # Append probability for machine label  
-            human_score.append(1.0 - score)           # Record inverted score for human  
-        label.append(HUMAN)                           # Append HUMAN to ground truth labels  
-  
-    # Run the model on machine-generated texts  
-    result = pipe(machine)  
-    machine_score = []  
-    for sub_result in result:  
-        score = float(sub_result['score'])  
-        if sub_result['label'] == human_label:  
-            hard_predict.append(HUMAN)  
-            predict.append(1.0 - score)  
-            machine_score.append(1.0 - score)  
-        else:  
-            hard_predict.append(MACHINE)  
-            predict.append(score)  
-            machine_score.append(score)  
-        label.append(MACHINE)  
-  
-    # If either human or machine input is empty, calculate and return the accuracy  
-    if len(human) == 0 or len(machine) == 0:  
-        acc = accuracy_score(label, hard_predict)  
-        print(f"acc = {acc}\n")  
-        return acc  
-      
-    # Otherwise, calculate and return the ROC AUC score using the provided calculate_roc_by_RADAR_code  
-    else:  
-        roc_auc_by_RADAR = calculate_roc_by_RADAR_code(label, predict)  
-        print(f"roc_auc_by_RADAR = {roc_auc_by_RADAR}\n")  
-        return roc_auc_by_RADAR  
-
-
-def calculate_roc_by_RADAR_code(label, pred):  
-    """  
-    Calculates the ROC metric (Receiver Operating Characteristic) for inputs labeled as HUMAN and non-HUMAN.  
-      
-    This function separates predicted values into human and machine lists based on their labels,  
-    then calculates ROC-related metrics using the 'get_roc_metrics' function.  
-      
-    Parameters:  
-        label (list): List of labels corresponding to each prediction. HUMAN and others.  
-        pred (list): List of prediction scores corresponding to each label.  
-      
-    Returns:  
-        The last value from the ROC metrics computed by get_roc_metrics.  
-    """  
-    # Initialize a list to hold prediction scores with HUMAN labels  
-    human = []  
-    # Initialize a list to hold prediction scores with non-HUMAN labels (machines)  
-    machine = []  
-    # Iterate over the labels and prediction scores in parallel  
-    for la, pr in zip(label, pred):  
-        # If the label indicates human, add the prediction to the human list  
-        if la == HUMAN:  
-            human.append(pr)  
-        # Otherwise, add the prediction to the machine list  
-        else:  
-            machine.append(pr)  
-    # Compute ROC metrics using the separated lists  
-    result = get_roc_metrics(human, machine)  
-    # Return the desired metric (the last element of the result)  
-    return result[-1]  
-
-def get_roc_metrics(human_preds, ai_preds):  
-    """  
-    Computes ROC curve metrics (FPR, TPR, AUC) for two prediction lists.  
-  
-    Parameters:  
-        human_preds (list of float): Prediction scores for the 'human' class (negative samples).  
-        ai_preds (list of float): Prediction scores for the 'AI' class (positive samples).  
-  
-    Returns:  
-        tuple:   
-            - fpr (list of float): False Positive Rate values for the ROC curve.  
-            - tpr (list of float): True Positive Rate values for the ROC curve.  
-            - roc_auc (float): Area Under the ROC Curve.  
-  
-    This function combines the provided prediction scores into a single list,  
-    constructs the true label array, computes the ROC curve,  
-    and finally calculates the area under the curve.  
-    """  
-  
-    # Create ground-truth labels: 0 for humans, 1 for AI  
-    labels = [0] * len(human_preds) + [1] * len(ai_preds)  
-  
-    # Concatenate both predictions (order: humans first, then AI)  
-    scores = human_preds + ai_preds  
-  
-    # Calculate False Positive Rate (fpr), True Positive Rate (tpr), and thresholds  
-    fpr, tpr, _ = roc_curve(labels, scores, pos_label=1)  
-  
-    # Compute the Area Under the ROC Curve (AUC)  
-    roc_auc = auc(fpr, tpr)  
-  
-    # Convert fpr and tpr to lists, ensure roc_auc is a float, and return  
-    return fpr.tolist(), tpr.tolist(), float(roc_auc)  
-
-
-def calculate_roc_by_radar_code(label, pred):  
-    """  
-    Calculates the ROC (Receiver Operating Characteristic) metric based on label and prediction lists  
-    following the RADAR code classification.  
-  
-    Parameters:  
-        label (list): List of ground truth labels, each label is expected to be either HUMAN or another type (e.g., MACHINE).  
-        pred (list): List of model predictions corresponding to the label list.  
-  
-    Returns:  
-        float: The last element of the result returned by get_roc_metrics,   
-               which likely represents the ROC AUC score or a similar metric.  
-    """  
-  
-    # Initialize list to collect predictions where the label is HUMAN  
-    human = []  
-    # Initialize list to collect predictions where the label is not HUMAN (assumed MACHINE)  
-    machine = []  
-  
-    # Iterate over label and prediction pairs  
-    for la, pr in zip(label, pred):  
-        # If label is HUMAN, append prediction to human list  
-        if la == HUMAN:  
-            human.append(pr)  
-        # Otherwise (assumed MACHINE), append prediction to machine list  
-        else:  
-            machine.append(pr)  
-      
-    # Call the get_roc_metrics function with the two lists to obtain ROC-related metrics  
-    result = get_roc_metrics(human, machine)  
-    # Return the last element of the result, possibly the ROC AUC score  
-    return result[-1]  
-
-
-import os  
-  
-def create_folder_for_file(file_name):  
-    """  
-    Creates a folder (directory) for the given file path if it does not already exist.  
-  
-    Parameters:  
-        file_name (str): The path to the file for which the containing folder should be created.  
-  
-    Returns:  
-        None  
-    """  
-    # Extract the directory path from the file path  
-    path_name = os.path.dirname(file_name)  
-    # Print the directory path to the console for debugging  
-    print(f"path_name = {path_name}")  
-    # Check if the directory exists  
-    if not os.path.exists(path_name):  
-        # Create the directory (including intermediate folders if necessary)  
-        os.makedirs(path_name)  
-
-
-def search_engine_predict_with_unparallel_data(  
-    input_file,  
-    output_file,  
-    is_check_bbc=True,  
-    number_sample=-1,  
-    is_wikipedia=True  
-):  
-    """  
-    Processes a dataset for search engine prediction tasks with unparallel data.  
-  
-    Parameters:  
-        input_file (str): Path to the input CSV file. The CSV must have two columns: 'text' and 'label'.  
-        output_file (str): Path to the output CSV file where the results will be saved.  
-        is_check_bbc (bool, optional): Flag to indicate whether to include BBC sources during the search. Defaults to True.  
-        number_sample (int, optional): The number of samples to process. If -1, process all samples. Defaults to -1.  
-        is_wikipedia (bool, optional): Flag to indicate whether to include Wikipedia sources. Defaults to True.  
-  
-    The output CSV file will have the following columns:  
-        text: The input text.  
-        label: HUMAN/MACHINE ground truth label.  
-        best_url: The URL with the highest similarity.  
-        best_avg_similarity: The similarity score for the best_url.  
-        best_data: The content of the best-matched data.  
-  
-    Returns:  
-        None  
-    """  
-  
-    # Read input data from CSV file  
-    data = read_csv_data(input_file)  
-  
-    # If number_sample is -1, process all data  
-    if number_sample == -1:  
-        number_sample = len(data)  
-  
-    # Ensure the output file's folder exists  
-    create_folder_for_file(output_file)  
-  
-    # If output file does not exist, create it and write the header  
-    if not os.path.exists(output_file):  
-        header = ["text", "label", "best_url", "best_avg_similarity", "best_data"]  
-        write_to_csv(output_file, header)  
-  
-    # Read any already-processed output data for resuming capability  
-    output_data = read_csv_data(output_file)  
-    number_of_process_samples = len(output_data)  
-  
-    # Select unprocessed samples to work on  
-    data = data[number_of_process_samples:number_sample]  
-  
-    # Process each data item  
-    for item in data:  
-        input_text = item[0]  # Extract the input text  
-        label = item[1]       # Extract the corresponding label  
-  
-        # Handle API error cases in the input text  
-        if API_ERROR in input_text:  
-            best_url = ""              # No result for API error  
-            best_avg_similarity = -1   # Indicate similarity not available  
-            best_data = ""             # No data available  
-        else:  
-            # Find the best similarity using a relative search method  
-            best_url, best_avg_similarity, best_data = find_best_similarity_by_relative_search(  
-                input_text,  
-                is_check_bbc,  
-                is_wikipedia  
-            )  
-  
-        # Construct the row with processed information  
-        row = [input_text, label, best_url, best_avg_similarity, best_data]  
-  
-        # Write result row to the output CSV file  
-        write_to_csv(output_file, row=row)  
-
-def evaluate_baseline_with_search_engine_support(  
-    samples,   
-    human_threshold,   
-    machine_threshold,   
+def evaluate_baseline_with_search_engine_support_and_confidence(  
+    samples,  
+    human_threshold,  
+    machine_threshold,  
     is_hard=True  
 ):  
     """  
-    Evaluates the performance of baseline models (with and without search engine support)   
-    on a dataset of labeled text samples.  
+    Evaluate baseline with search engine support and confidence.  
   
-    Parameters:  
-        samples (list): Each element is a tuple of (text, label, best_avg_similarity).  
-        human_threshold (float): Threshold for human-written text classification.  
-        machine_threshold (float): Threshold for machine-generated text classification.  
-        is_hard (bool, optional): If True, use strict/hard decision in classification. Default is True.  
+    Args:  
+        samples: List of samples. Each item contains (text, label, best_avg_similarity).  
+        human_threshold: Threshold for human classification.  
+        machine_threshold: Threshold for machine classification.  
+        is_hard: Whether to use hard thresholding.  
   
-    Returns:  
-        None: Results are written to OUTPUT_FILE as a string.  
+    Writes results to OUTPUT_FILE.  
     """  
-  
-    # Lists to store human and machine texts separately  
     human = []  
     machine = []  
-    # Lists to store similarity scores for human and machine texts  
     human_similarity = []  
     machine_similarity = []  
   
-    # # Constants for label comparison  
-    # HUMAN = 1  
-    # MACHINE = 0  
-  
-    # Loop over all samples in the dataset and distribute them based on their label  
     for sample in samples:  
-        text = sample[0]  # The text content  
-        label = sample[1]  # Label to indicate human or machine-generated  
-        best_avg_similarity = sample[2]  # Precomputed average similarity score  
+        text = sample[0]  
+        label = sample[1]  
+        best_avg_similarity = sample[2]  
   
         if label == HUMAN:  
             human.append(text)  
@@ -642,512 +576,258 @@ def evaluate_baseline_with_search_engine_support(
             machine.append(text)  
             machine_similarity.append(best_avg_similarity)  
   
-    # Initialize a dictionary to store classification results from different models  
     result = dict()  
-  
-    # Evaluate using the "yaful/MAGE" model  
     model = "yaful/MAGE"  
     human_label = 1  
     machine_label = 0  
-    # Detect without search engine support  
-    result[model] = detect_by_huggingface(  
-        model, human, machine, human_label, machine_label, is_hard  
+  
+    result[model], result[model + "_search_engine_support"] = (  
+        detect_by_huggingface_with_search_engine_support_and_confidence(  
+            model,  
+            human,  
+            machine,  
+            human_label,  
+            machine_label,  
+            human_similarity,  
+            machine_similarity,  
+            human_threshold,  
+            machine_threshold,  
+            is_hard  
+        )  
     )  
-    # Detect with search engine support and similarity thresholds  
-    result[model + "_search_engine_support"] = detect_by_huggingface_with_search_engine_support(  
-        model, human, machine, human_label, machine_label,  
-        human_similarity, machine_similarity,   
-        human_threshold, machine_threshold,   
-        is_hard  
-    )  
- 
-    # Evaluate using the "TrustSafeAI/RADAR-Vicuna-7B" model  
-    model = "TrustSafeAI/RADAR-Vicuna-7B"
-    human_label = "LABEL_1"
-    machine_label = "LABEL_0"
-
-    # Detect without search engine support  
-    result[model] = detect_by_huggingface(  
-        model, human, machine, human_label, machine_label, is_hard  
-    )  
-    # Detect with search engine support and similarity thresholds  
-    result[model + "_search_engine_support"] = detect_by_huggingface_with_search_engine_support(  
-        model, human, machine, human_label, machine_label,  
-        human_similarity, machine_similarity,   
-        human_threshold, machine_threshold,   
-        is_hard  
+  
+    model = "TrustSafeAI/RADAR-Vicuna-7B"  
+    human_label = "LABEL_1"  
+    machine_label = "LABEL_0"  
+  
+    result[model], result[model + "_search_engine_support"] = (  
+        detect_by_huggingface_with_search_engine_support_and_confidence(  
+            model,  
+            human,  
+            machine,  
+            human_label,  
+            machine_label,  
+            human_similarity,  
+            machine_similarity,  
+            human_threshold,  
+            machine_threshold,  
+            is_hard  
+        )  
     ) 
 
-    # Write the results to the output file  
-    write_to_file(OUTPUT_FILE, str(result))  
+    write_to_file(OUTPUT_FILE, str(result))
 
-def longest_increasing_subsequence(arr):  
-    """  
-    Finds the indices of the Longest Increasing Subsequence (LIS) in a given list.  
-  
-    Parameters:  
-        arr (List[int]): The input list of integers.  
-  
-    Returns:  
-        List[int]: The list of indices that form the LIS in the input list.  
-    """  
-    # Return empty list if input is empty  
-    if not arr:  
-        return []  
-  
-    # Store the length of the input array  
-    n = len(arr)  
-  
-    # Initialize the dp array with all elements set to 1 (each element is a subsequence)  
-    dp = [1] * n  
-  
-    # Initialize the trace array for reconstructing the LIS  
-    trace = [-1] * n  
-  
-    # Compute dp values and trace the predecessors  
-    for i in range(n):  
-        for j in range(i):  
-            # If a valid increasing pair is found, update dp and trace  
-            if arr[j] < arr[i] and dp[j] + 1 > dp[i]:  
-                dp[i] = dp[j] + 1  
-                trace[i] = j  
-  
-    # Find the length of the longest increasing subsequence  
-    max_length = max(dp)  
-  
-    # Find the index where LIS ends  
-    index = dp.index(max_length)  
-  
-    # Reconstruct the sequence of indices for the LIS  
-    lis_indices = []  
-    while index != -1:  
-        lis_indices.append(index)  
-        index = trace[index]  
-  
-    # Return the indices in the correct order  
-    return lis_indices[::-1]  
 
-def check_matching_index(matching_index, error_matching_ratio, max_matching_len):  
-    """  
-    Checks if a list of matching indexes is ordered and the gaps between   
-    consecutive indexes are within a specified limit, allowing for a certain   
-    error ratio.  
-  
-    Parameters:  
-        matching_index (list of int): The list of indexes to check.  
-        error_matching_ratio (float): The maximum allowed ratio of errors.  
-        max_matching_len (int): The maximum allowed difference between consecutive indexes.  
-  
-    Returns:  
-        bool: True if the proportion of correctly ordered and close-enough indexes   
-              meets the threshold, False otherwise.  
-    """  
-    correct = 0  # Initialize counter for correct matches  
-  
-    for index in range(len(matching_index)):  
-        if index == 0:  
-            # The first element is always considered correct  
-            correct += 1  
-        else:  
-            current = matching_index[index]         # Current element  
-            previous = matching_index[index - 1]    # Previous element  
-            # Check if current index is >= previous and difference is within limit  
-            if current >= previous and current - previous <= max_matching_len:  
-                correct += 1   # Count as correct if condition satisfied  
-  
-    if len(matching_index) <= 0:  
-        # If input list is empty, return False  
-        return False  
-  
-    correct_ratio = correct / len(matching_index)  # Calculate ratio of correct matches  
-  
-    # Return True if the error ratio is within allowable bounds  
-    if 1 - correct_ratio <= error_matching_ratio:  
-        return True  
-  
-    return False  # Otherwise, return False  
-
-def estimate_sample_similarity_by_SearchLLM(  
-    text,  
-    best_url,  
-    filtered_threshold,  
-    remain_ratio_threshold,  
-    verbose=False,  
-    model_name=GPT_4O_MINI,  
-    provider=OPENAI  
+def baseline_with_SearchLLM_with_regeneration_and_confidence(  
+    input_file,  
+    min_ratio,  
+    min_sim_paraphrase,  
+    min_sim_machine,  
+    min_sim_human,  
+    min_regenerate_diff,  
+    verbose=False  
 ):  
     """  
-    Estimates the similarity between a sample text and a reference found at best_url  
-    using search and language modeling. If the similarity is too low, attempts   
-    to regenerate the text and measure similarity again.  
+    Process input data with SearchLLM using regeneration and confidence thresholds.  
   
-    Parameters:  
-        text (str): The sample text to be compared.  
-        best_url (str): The URL containing the reference text for comparison.  
-        filtered_threshold (float): Minimum similarity score to consider a match as valid.  
-        remain_ratio_threshold (float): Minimum ratio of matched sentences to accept sim score.  
-        verbose (bool, optional): If True, prints debug information. Default is False.  
-        model_name (str, optional): The name of the model used for regeneration, default to GPT_4O_MINI.  
-        provider (str, optional): The provider for the language model, default to OPENAI.  
-  
-    Returns:  
-        tuple: (regenerated_text (str or None), original_sim (float), regeneration_sim (float))  
-        - regenerated_text: Regenerated text if similarity is too low; otherwise, None.  
-        - original_sim: Similarity score before regeneration.  
-        - regeneration_sim: Similarity score after regeneration (only if performed).  
-    """  
-  
-    # Set thresholds  
-    error_matching_ratio = 0.1  
-    max_matching_len = 3  
-  
-    regenerated_text = None      # Variable to store regenerated text if needed  
-    original_sim = 0             # Original similarity score  
-    regeneration_sim = 0         # Similarity score after regeneration, if performed  
-    average = 0                  # Average similarity of filtered matches  
-    remain_ratio = 0             # Ratio of content that remains after filtering  
-    num_sentence = 0             # Total number of compared sentence pairs  
-  
-    # Check if a valid URL is provided for comparison  
-    if best_url is not None and best_url != "":  
-        # Calculate similarities and matching data with the reference content from the url  
-        avg_similarity, matching_data, matching_index = measure_similarity_with_url_return_matching_index(text, best_url)  
-  
-        # Validate matching indices with error thresholds  
-        if not check_matching_index(matching_index, error_matching_ratio, max_matching_len):  
-            if verbose:  
-                print("check_matching_index is false")  
-            # Early exit if not valid  
-            return regenerated_text, original_sim, regeneration_sim  
-  
-        if verbose:  
-            print(f"matching_index = {matching_index}")  
-  
-        filtered_sim = []           # List to store similarity scores after filtering  
-        num_sentence = len(matching_data)   # Number of sentence pairs  
-  
-        filtered_match = []         # List of matches with similarity above threshold  
-        filter_matching_index = []  # Matching indices above threshold  
-        filter_original_index = []  # Indices of the original sentences that matched  
-  
-        # Iterate through matched sentence pairs and their similarity scores  
-        for ori_index, (match, match_index) in enumerate(zip(matching_data, matching_index)):  
-            sentence_1 = match[0]   # Sentence from sample text  
-            sentence_2 = match[1]   # Sentence from url reference text  
-            sim = float(match[2])   # Similarity score  
-  
-            # Keep only matches with similarity above the given threshold  
-            if sim >= filtered_threshold:  
-                filtered_match.append(match)  
-                filter_matching_index.append(match_index)  
-                filter_original_index.append(ori_index)  
-                if verbose:  
-                    print(f"sentence_1 = {sentence_1}")  
-                    print(f"sentence_2 = {sentence_2}")  
-                    print(f"sim = {sim}")  
-  
-        # Select longest increasing subsequence to keep matched sentence order  
-        selected_index = longest_increasing_subsequence(filter_matching_index)  
-        if verbose:  
-            print(f"filter_matching_index = {filter_matching_index}")  
-            print(f"selected_index = {selected_index}")  
-  
-        # Gather similarity scores from filtered, ordered matches  
-        for index in selected_index:  
-            sim = float(filtered_match[index][2])  
-            filtered_sim.append(sim)  
-  
-        # Calculate the ratio of matched sentences to original  
-        if num_sentence > 0:  
-            remain_ratio = len(filtered_sim) / num_sentence  
-  
-        # If any filtered similarities, calculate their average  
-        if len(filtered_sim) > 0:  
-            average = np.average(filtered_sim)  
-  
-    # If the ratio of matched sentences passes the threshold:  
-    if remain_ratio >= remain_ratio_threshold:  
-        original_sim = average  
-        # If high enough similarity, no regeneration needed  
-        if average >= 0.97:  
-            return regenerated_text, original_sim, regeneration_sim  
-        else:  
-            input_index = []          # Index of input sentences to regenerate  
-            source_from_url_index = []# Indices of reference sentences to check against  
-            for index in selected_index:  
-                input_index.append(filter_original_index[index])  
-                source_from_url_index.append(filter_matching_index[index])  
-  
-            # Attempt regeneration using the given model and provider  
-            regeneration_sim, regenerated_text = calculate_sim_for_regeneration(  
-                text,  
-                best_url,  
-                matching_index,  
-                input_index,  
-                source_from_url_index,  
-                model_name,  
-                verbose,  
-                provider  
-            )  
-  
-            if verbose:  
-                print(f"filtered_sim = {filtered_sim}")  
-                print(f"original_sim = {original_sim}")  
-                print(f"regeneration_sim = {regeneration_sim}")  
-  
-            # If regeneration fails, set similarity to 0  
-            if regeneration_sim is None:  
-                regeneration_sim = 0  
-                return regenerated_text, original_sim, regeneration_sim  
-            else:  
-                return regenerated_text, original_sim, regeneration_sim  
-  
-    # If not enough content remains or no similarity can be calculated  
-    return regenerated_text, original_sim, regeneration_sim  
-
-def estimate_similarity_by_SearchLLM(  
-    search_engine_csv,  
-    output_file,  
-    filtered_threshold,  
-    human_threshold,  
-    machine_threshold,  
-    remain_ratio_threshold,  
-    number_sample=-1,  
-    verbose=False,  
-    model_name=GPT_4O_MINI,  
-    provider=OPENAI  
-):  
-    """  
-    Estimates text similarity using a search engine and LLM (Language Learning Model) regeneration.  
-  
-    This function processes a CSV file containing search engine results, and for each sample,   
-    estimates the similarity between the original text and text regenerated using a LLM,   
-    particularly for results from Wikipedia. The results are stored or appended to an output CSV file,   
-    enabling checkpointing and progress continuation if interrupted.  
-  
-    Parameters:  
-        search_engine_csv (str): Path to the input CSV file containing search engine data.  
-        output_file (str): Path to the output CSV file in which to store results.  
-        filtered_threshold (float): The similarity threshold for filtering candidates.  
-        human_threshold (float): The similarity threshold used for human evaluation.  
-        machine_threshold (float): The similarity threshold used for machine evaluation.  
-        remain_ratio_threshold (float): The threshold for filtering candidates based on remain ratio.  
-        number_sample (int, optional): Number of samples to process; set to -1 to process all.  
-        verbose (bool, optional): Whether to print verbose progress information.  
-        model_name (str, optional): Name of the LLM model to use for regeneration/comparison.  
-        provider (str, optional): The service provider for the LLM model.  
+    Args:  
+        input_file (str): Input CSV file path.  
+        min_ratio (float): Minimum ratio for alignment.  
+        min_sim_paraphrase (float): Minimum similarity for paraphrase.  
+        min_sim_machine (float): Minimum similarity for machine.  
+        min_sim_human (float): Minimum similarity for human.  
+        min_regenerate_diff (float): Minimum regeneration difference.  
+        verbose (bool, optional): Verbosity flag. Defaults to False.  
   
     Returns:  
         None  
     """  
+    human_threshold = 0.8  
+    machine_threshold = 0.5  
   
-    # Read the input data from the search engine CSV file  
-    data = read_csv_data(search_engine_csv)  
+    write_to_file(OUTPUT_FILE, "\n\nBASELINE WITH SEARCH ENGINE SUPPORT AND CONFIDENCE\n")  
+    write_to_file(OUTPUT_FILE, f"csv_file = {input_file}\n")  
+    data = read_csv_data(input_file)  
   
-    # If number_sample is -1, process all samples; else, use the specified number  
-    if number_sample == -1:  
-        number_sample = len(data)  
+    samples = []  # text, label, best_avg_similarity  
   
-    # Ensure the output folder exists, create if it doesn't  
-    create_folder_for_file(output_file)  
-  
-    # If the output file doesn't already exist, create it with the appropriate header  
-    if not os.path.exists(output_file):  
-        header = [  
-            "text",  
-            "label",  
-            "best_url",  
-            "original_sim",  
-            "regeneration_sim",  
-            "regenerated_text",  
-            "best_avg_similarity",  
-            "best_data",  
-        ]  
-        write_to_csv(output_file, header)  
-  
-    # Read the existing output data for progress tracking (for checkpointing/resuming)  
-    output_data = read_csv_data(output_file)  
-    number_of_process_samples = len(output_data)  
-  
-    # Select the data not yet processed, up to number_sample samples  
-    data = data[number_of_process_samples:number_sample]  
-  
-    # Process each item in the selected data  
     for item in data:  
-        text = item[0]            # Original text to estimate similarity with  
-        label = item[1]           # Corresponding label for the text  
-        best_url = item[2]        # The best-matching URL from search engine results  
-        best_avg_similarity = item[3]  # Precomputed best average similarity  
-        best_data = item[4]       # Associated data for the best match  
+        text = item[0]  
+        label = item[1]  
+        original_similarity = convert_to_object(item[4])  
+        original_mapping = convert_to_object(item[5])  
+        regeneration_similarity = convert_to_object(item[6])  
+        regeneration_mapping = convert_to_object(item[7])  
   
-        regenerated_text = None   # Placeholder for text regenerated by LLM  
-        original_sim = 0          # Placeholder for original similarity value  
-        regeneration_sim = 0      # Placeholder for similarity after regeneration  
+        searchLLM_predict, confidence = predict_by_SearchLLM_with_regeneration_and_alignment_and_confidence(  
+            original_similarity,  
+            original_mapping,  
+            regeneration_similarity,  
+            regeneration_mapping,  
+            min_ratio,  
+            min_sim_paraphrase,  
+            min_sim_machine,  
+            min_sim_human,  
+            min_regenerate_diff  
+        )  
   
-        # Only process Wikipedia URLs for regeneration/similarity estimation  
-        if "wikipedia.org" in best_url:  
-            regenerated_text, original_sim, regeneration_sim = estimate_sample_similarity_by_SearchLLM(  
-                text,  
-                best_url,  
-                filtered_threshold,  
-                remain_ratio_threshold,  
-                verbose,  
-                model_name,  
-                provider  
-            )  
-  
-        # Combine results into a row for CSV writing  
-        row = [  
-            text,  
-            label,  
-            best_url,  
-            original_sim,  
-            regeneration_sim,  
-            regenerated_text,  
-            best_avg_similarity,  
-            best_data,  
-        ]  
-  
-        # Write the result row to the output CSV file  
-        write_to_csv(output_file, row)  
-
-def baseline_with_search_engine_support_filter_from_pre_estimate(  
-    search_engine_csv, human_threshold, machine_threshold, min_diff_regeneration  
-):  
-    """  
-    Processes search engine results, filters and evaluates samples based on provided similarity thresholds.  
-  
-    This function reads a CSV of search engine outputs.  
-    It determines which samples pass given similarity thresholds for 'human' and 'machine' acceptability.  
-    It appends qualifying samples to a list, which is then evaluated.  
-  
-    Parameters:  
-        search_engine_csv (str): Path to the CSV file containing search engine results.  
-        human_threshold (float): Similarity threshold to accept as 'human-quality' output.  
-        machine_threshold (float): Similarity threshold to accept as 'machine-quality' output.  
-        min_diff_regeneration (float): Minimum required difference between regeneration and original similarity to pass as 'machine-quality'.  
-  
-    Returns:  
-        None  
-    """  
-    # Log the start of the baseline with search engine support evaluation  
-    write_to_file(OUTPUT_FILE, "\n\nBASELINE WITH SEARCH ENGINE SUPPORT\n")  
-  
-    # Log the name of the CSV file being processed  
-    write_to_file(OUTPUT_FILE, f"csv_file = {search_engine_csv}\n")  
-  
-    # Read in CSV data using a helper function  
-    data = read_csv_data(search_engine_csv)  
-  
-    # Prepare a list to hold filtered samples: (text, label, best_avg_similarity)  
-    samples = []  
-  
-    # Iterate through each row in the CSV data  
-    for item in data:  
-        text = item[0]  # The text sample  
-        label = item[1]  # The label/classification, e.g. human or machine  
-        original_sim = float(item[3])  # Similarity score before regeneration  
-        regeneration_sim = float(item[4])  # Similarity score after regeneration  
-  
-        # Determine final similarity based on thresholds  
-        if original_sim >= human_threshold:  
-            # If original similarity passes human threshold, accept it  
-            final_similarity = original_sim  
-        elif original_sim >= machine_threshold:  
-            # If only machine threshold is passed, check regeneration improvement  
-            if regeneration_sim - original_sim >= min_diff_regeneration:  
-                # If improvement is sufficient, accept; else reject  
-                final_similarity = original_sim  
-            else:  
-                final_similarity = 0  
+        if searchLLM_predict == HUMAN:  
+            final_similarity = (human_threshold, confidence)  
+        elif searchLLM_predict == MACHINE:  
+            final_similarity = (machine_threshold, confidence)  
         else:  
-            # If neither threshold is met, reject  
-            final_similarity = 0  
+            final_similarity = (0, 0)  # undecided  
   
-        # Create a triple (text, label, final_similarity)  
         triple = (text, label, final_similarity)  
-  
-        # Add the filtered sample to the list  
         samples.append(triple)  
   
-    # Flag to indicate evaluation difficulty, set as False for baseline evaluation  
     is_hard = False  
-  
-    # Log the difficulty flag  
     write_to_file(OUTPUT_FILE, f"is_hard = {is_hard}\n")  
-  
-    # Perform baseline evaluation with search engine support  
-    evaluate_baseline_with_search_engine_support(  
+    evaluate_baseline_with_search_engine_support_and_confidence(  
         samples, human_threshold, machine_threshold, is_hard  
-    )  
+    )
 
-if __name__ == "__main__":  
+def testing():  
     """  
-    The main entry point of the script.  
-    Executes three main steps:  
-    1. Generate search engine predictions for input data.  
-    2. Estimate similarity using a SearchLLM model.  
-    3. Apply baseline filtering based on these estimates.  
+    Set up parameters and files, then run similarity calculations and baseline evaluation.  
     """  
+    a = 2  
+    global OUTPUT_FILE  
+    OUTPUT_FILE = "5_data/result.txt"  
   
-    # ===== Step 1: Generate search engine predictions =====  
-  
-    # Specify the path to the input data file  
-    input_file = "5_data/data.csv"  
-    # Specify the path to save the search engine results  
-    output_file = "5_data/search_engine.csv"  
-    # Number of samples to collect per entry  
-    num_sample = -1  
-    # Whether to check for BBC results  
-    is_check_bbc = False  
-    # Whether to enable Wikipedia as a source  
-    is_wikipedia = True  
-  
-    # Run search engine prediction with the provided configuration  
-    search_engine_predict_with_unparallel_data(  
-        input_file, output_file, is_check_bbc, num_sample, is_wikipedia  
-    )  
-  
-    # ===== Step 2: Estimate similarity using SearchLLM =====  
-  
-    # Path to search engine predictions file  
-    search_engine_csv = "5_data/search_engine.csv"  
-    # Path to output similarity estimates  
-    output_file = "5_data/searchLLM.csv"  
-    # Threshold for filtering similarity  
-    human_threshold = 0.97  
-    machine_threshold = 0.8  
-    filtered_threshold = 0.8  
-    # Minimum ratio of samples to retain after filtering.  
-    remain_ratio_threshold = 0.5  
-    # Number of samples to process, -1 means all  
+    # Set parameters for similarity calculation  
+    number_of_first_sentences = 1  
     number_sample = -1  
-    # Name of the model to use for similarity estimation  
-    model_name = GPT_4O_MINI
-    # Provider of the model  
-    provider = OPENAI
-    # Toggle for verbose output  
-    verbose = True  
+    minimum_similarity_for_mapping = 0.7  
+    minimum_similarity_for_regeneration = 0.7  
+    min_rate = 0.3  
+    model_name = GPT_4O_MINI  
+    input_file = "5_data/data.csv"  
+    output_file = "5_data/similarity.csv"  
   
-    # Run similarity estimation using a language model  
-    estimate_similarity_by_SearchLLM(  
-        search_engine_csv, output_file, filtered_threshold,  
-        human_threshold, machine_threshold, remain_ratio_threshold,  
-        number_sample, verbose, model_name, provider  
+    calculate_similarity_by_SeachLLM_greedy_mapping_with_regeneration(  
+        input_file,  
+        output_file,  
+        model_name,  
+        number_of_first_sentences,  
+        minimum_similarity_for_mapping,  
+        minimum_similarity_for_regeneration,  
+        min_rate,  
+        number_sample  
     )  
   
-    # ===== Step 3: Baseline filter using pre-estimate results =====  
-  
-    # Path to similarity estimation results for baseline filtering  
-    search_engine_csv = "5_data/searchLLM.csv"  
-    # Similarity threshold for filtering as human-level  
-    human_threshold = 0.97  
-    # Similarity threshold for filtering as machine-level  
-    machine_threshold = 0.9  
-    # Minimum difference required for regeneration  
-    min_diff_regeneration = 0  
-  
-    # Apply baseline filter using the estimated similarity results  
-    baseline_with_search_engine_support_filter_from_pre_estimate(  
-        search_engine_csv, human_threshold, machine_threshold, min_diff_regeneration  
+    input_file = output_file  
+    baseline_with_SearchLLM_with_regeneration_and_confidence(  
+        input_file,  
+        MIN_RATIO,  
+        MIN_SIM_PARAPHRASE,  
+        MIN_SIM_MACHINE,  
+        MIN_SIM_HUMAN,  
+        MIN_REGENERATE_DIFF  
     )  
+  
+  
+def get_roc_metrics(human_preds, ai_preds):  
+    """  
+    Compute ROC curve and AUC for predictions from human and AI.  
+    human_preds: probabilities for human-generated text.  
+    ai_preds: probabilities for AI-generated text.  
+    """  
+    fpr, tpr, _ = roc_curve(  
+        [0] * len(human_preds) + [1] * len(ai_preds),  
+        human_preds + ai_preds,  
+        pos_label=1  
+    )  
+    roc_auc = auc(fpr, tpr)  
+    return fpr.tolist(), tpr.tolist(), float(roc_auc)  
+  
+  
+def calculate_roc_by_RADAR_code(label, pred):  
+    """  
+    Separate predictions into human and machine, then compute ROC AUC.  
+    """  
+    human = []  
+    machine = []  
+    for la, pr in zip(label, pred):  
+        if la == HUMAN:  
+            human.append(pr)  
+        else:  
+            machine.append(pr)  
+    result = get_roc_metrics(human, machine)  
+    return result[-1]  
+  
+  
+def matrix_based_on_threshold(y_true_text, predict_for_baseline_only, threshold):  
+    """  
+    Compute confusion matrix based on thresholded predictions.  
+    """  
+    y_true = []  
+    for y in y_true_text:  
+        if y == HUMAN:  
+            y_true.append(HUMAN_LABEL)  
+        else:  
+            y_true.append(MACHINE_LABEL)  
+    y_true = np.array(y_true)  
+    y_pred_optimal = (predict_for_baseline_only >= threshold).astype(int)  
+    conf_matrix = confusion_matrix(  
+        y_true,  
+        y_pred_optimal,  
+        labels=[HUMAN_LABEL, MACHINE_LABEL]  
+    )  
+    return conf_matrix
+
+def compare_models_scaled(gold_labels, scores_model1, scores_model2, scaling='minmax'):  
+    """  
+    Compare two models based on adjusted scores and normalization to the same scale.  
+    - For label 'human': higher score is better.  
+    - For label 'machine': lower score is better (invert sign).  
+    - Normalize scores to the same scale (min-max or z-score).  
+    - Perform Paired t-test.  
+      
+    Parameters:  
+        gold_labels: list of actual labels ['human', 'machine', ...]  
+        scores_model1: list of scores from model 1  
+        scores_model2: list of scores from model 2  
+        scaling: 'minmax' or 'zscore' (default is 'minmax')  
+      
+    Returns:  
+        p-value  
+        Conclusion about which model is better if p-value < 0.05  
+    """  
+    # Step 1: Adjust scores so that higher is always better  
+    adjusted1 = []  
+    adjusted2 = []  
+    for label, s1, s2 in zip(gold_labels, scores_model1, scores_model2):  
+        if label == 'human':  
+            adjusted1.append(s1)  
+            adjusted2.append(s2)  
+        elif label == 'machine':  
+            adjusted1.append(-s1)  
+            adjusted2.append(-s2)  
+        else:  
+            raise ValueError(f"Invalid label: {label}")  
+  
+    # Step 2: Normalize scores to the same scale  
+    adjusted1 = np.array(adjusted1).reshape(-1, 1)  
+    adjusted2 = np.array(adjusted2).reshape(-1, 1)  
+    combined = np.hstack([adjusted1, adjusted2])  
+  
+    if scaling == 'minmax':  
+        scaler = MinMaxScaler()  
+    elif scaling == 'zscore':  
+        scaler = StandardScaler()  
+    else:  
+        raise ValueError("Parameter 'scaling' must be 'minmax' or 'zscore'.")  
+  
+    scaled = scaler.fit_transform(combined)  
+    scores1_scaled = scaled[:, 0]  
+    scores2_scaled = scaled[:, 1]  
+  
+    # Step 3: Perform Paired t-test  
+    statistic, p_value = ttest_rel(scores1_scaled, scores2_scaled)  
+    return p_value  
+  
+  
+if __name__ == "__main__":  
+    a = 2  
+    testing()
