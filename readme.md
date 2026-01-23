@@ -10,7 +10,7 @@
      - `API_VERSION`     
 
 2. **Data**
-   - PPrepare your dataset and save it as `5_data/data.csv`.
+   - Prepare your dataset and save it as `5_data/data.csv`.
    - Each line in the file should contain a text and a label, where the label is either `\"human\"` or `\"machine\"`.
 
      
